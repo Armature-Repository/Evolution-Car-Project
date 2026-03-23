@@ -1,0 +1,524 @@
+import pygame as pg
+import math
+import numpy as np
+import random
+import time
+
+WIDTH = 1600
+HEIGHT = 900
+WHITE = (255, 255, 255)
+RED = (255, 0, 0)
+BLACK = (0, 0, 0)
+GREEN = (0, 255, 0)
+BLUE = (0, 0, 255)
+
+FPS = 60
+
+# Neural Network parameters
+INPUT_SIZE = 8  # 8 sensor values
+HIDDEN_SIZE = 10  # Neurons in hidden layer
+OUTPUT_SIZE = 2  # [Acceleration, Steering]
+
+pg.init()
+screen = pg.display.set_mode((WIDTH, HEIGHT))
+pg.display.set_caption("Learning Car Game")
+
+class NeuralNetwork:
+    def __init__(self, weights=None):
+        # Initialize weights randomly if not provided
+        if weights is None:
+            # Create weights for input -> hidden, hidden -> output
+            self.weights = np.random.uniform(-1, 1, INPUT_SIZE * HIDDEN_SIZE + HIDDEN_SIZE * OUTPUT_SIZE)
+        else:
+            self.weights = weights
+            
+    def forward(self, inputs):
+        # Reshape weights
+        w1_size = INPUT_SIZE * HIDDEN_SIZE
+        w1 = self.weights[:w1_size].reshape(INPUT_SIZE, HIDDEN_SIZE)
+        w2 = self.weights[w1_size:].reshape(HIDDEN_SIZE, OUTPUT_SIZE)
+        
+        # Forward pass
+        hidden = np.tanh(np.dot(inputs, w1))  # Tanh activation
+        output = np.tanh(np.dot(hidden, w2))  # Tanh activation
+        
+        return output
+    
+    def get_weights(self):
+        return self.weights
+
+class Car:
+    def __init__(self, weights=None):
+        self.angle = 180
+        self.position = pg.math.Vector2(WIDTH // 2 + 20, 89)
+        self.velocity = pg.math.Vector2(0, 0)
+        self.acceleration = 0
+        self.thrust = 0.2        # Acceleration amount per frame
+        self.friction = 0.955    # Friction multiplier per frame (closer to 1 = less friction)
+        self.alive = True
+        self.checkpoint_number = 0
+        self.distance_traveled = 0
+        self.last_position = self.position.copy()
+        self.time_alive = 0
+        self.brain = NeuralNetwork(weights)
+        self.fitness = 0
+        
+        # For visualization
+        self.color = (
+            random.randint(100, 255),
+            random.randint(100, 255),
+            random.randint(100, 255)
+        )
+
+    def calculate_fitness(self):
+        checkpoint_bonus = self.checkpoint_number * 1000
+        time_penalty = max(0, 60 - self.time_alive) * 10  # Reward for surviving longer (up to 60 seconds)
+        self.fitness = checkpoint_bonus + self.distance_traveled + time_penalty
+        return self.fitness
+
+    def start_accelerating(self):
+        self.acceleration = self.thrust
+
+    def start_braking(self):
+        self.acceleration = -self.thrust
+
+    def stop_acceleration(self):
+        self.acceleration = 0
+
+    def think(self, sensor_values):
+        # Normalize sensor values (0-200 range to 0-1)
+        normalized_inputs = np.array(sensor_values) / 200.0
+        
+        # Get outputs from neural network
+        outputs = self.brain.forward(normalized_inputs)
+        
+        # Apply outputs to car controls
+        # Output[0] controls acceleration (-1 to 1)
+        if outputs[0] > 0.5:
+            self.start_accelerating()
+        elif outputs[0] < -0.5:
+            self.start_braking()
+        else:
+            self.stop_acceleration()
+            
+        # Output[1] controls steering (-1 to 1)
+        self.angle += outputs[1] * 3  # Scale steering
+
+    def update(self):
+        if not self.alive:
+            self.acceleration = 0
+            self.velocity *= 0.10
+            if self.velocity.length() < 0.05:
+                self.velocity = pg.math.Vector2(0, 0)
+            self.position += self.velocity
+            return
+            
+        # Track time alive
+        self.time_alive += 1/FPS  # Assuming 60 FPS
+        
+        # Store previous position for distance calculation
+        self.last_position = self.position.copy()
+        
+        rad = math.radians(self.angle)
+        direction = pg.math.Vector2(math.cos(rad), math.sin(rad))
+        self.velocity += direction * self.acceleration
+        self.velocity *= self.friction
+
+        # Stop completely if velocity is very small and no acceleration is applied
+        if self.velocity.length() <= 0.1 and self.acceleration == 0:
+            self.velocity = pg.math.Vector2(0, 0)
+
+        self.position += self.velocity
+        
+        # Calculate distance traveled
+        self.distance_traveled += self.last_position.distance_to(self.position)
+
+        # Keep car inside the screen bounds (optional)
+        self.position.x = max(0, min(WIDTH, self.position.x))
+        self.position.y = max(0, min(HEIGHT, self.position.y))
+
+    def sense(self, track_mask, screen, draw=False):
+        sensor_angles = [-120, -60, -30, 0, 30, 60, 120, 180]
+        sensor_distances = []
+
+        for offset_angle in sensor_angles:
+            angle = math.radians(self.angle + offset_angle)
+            direction = pg.math.Vector2(math.cos(angle), math.sin(angle))
+            sensor_length = 0
+            point = self.position.copy()
+
+            # Raycast until wall or max range
+            while (0 <= point.x < WIDTH and 0 <= point.y < HEIGHT and 
+                   track_mask.get_at((int(point.x), int(point.y))) == 0 and 
+                   sensor_length < 200):
+                point += direction
+                sensor_length += 1
+
+            # Draw the ray if requested
+            if draw:
+                end_point = (int(self.position.x + direction.x * sensor_length),
+                             int(self.position.y + direction.y * sensor_length))
+                pg.draw.line(screen, (0, 255, 0), self.position, end_point, 1)  # Green sensor line
+
+            sensor_distances.append(sensor_length)
+
+        return sensor_distances
+
+    def score(self, time):
+        self.calculate_fitness()
+        print(f"Car reached checkpoint {self.checkpoint_number} in {time:.2f} seconds")
+        print(f"Distance traveled: {self.distance_traveled:.2f}")
+        print(f"Fitness score: {self.fitness:.2f}")
+
+    def get_mask_and_rect(self):
+        car_width, car_height = 40, 20
+        car_surf = pg.Surface((car_width, car_height), pg.SRCALPHA)
+        
+        # Use custom color for the car if it's alive, darker version if dead
+        if self.alive:
+            car_color = self.color
+        else:
+            car_color = (self.color[0]//2, self.color[1]//2, self.color[2]//2)
+            
+        car_surf.fill(car_color)
+        
+        # Add direction arrow
+        arrow_points = [
+            (car_width * 0.7, car_height // 2),
+            (car_width * 0.4, car_height * 0.3),
+            (car_width * 0.4, car_height * 0.7)
+        ]
+        pg.draw.polygon(car_surf, BLACK, arrow_points)
+
+        rotated_surf = pg.transform.rotate(car_surf, -self.angle)
+        rotated_rect = rotated_surf.get_rect(center=self.position)
+
+        car_mask = pg.mask.from_surface(rotated_surf)
+        return rotated_surf, car_mask, rotated_rect
+
+    def draw(self, surface):
+        rotated_surf, _, rotated_rect = self.get_mask_and_rect()
+        surface.blit(rotated_surf, rotated_rect)
+
+class Track:
+    def __init__(self):
+        self.surface = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
+
+    def draw(self):
+        #outside track
+        pg.draw.arc(self.surface, (0, 0, 0), (-320, 50, 2100, 200), math.radians(40), math.radians(130), 5)
+        pg.draw.arc(self.surface, (0, 0, 0), (41, 58, 50, 490), math.radians(110), math.radians(250), 6)
+        pg.draw.line(self.surface, (0, 0, 0), (58, 530), (570, 340), 5)
+        pg.draw.arc(self.surface, (0, 0, 0), (546, 338, 60, 60), math.radians(-50), math.radians(100), 5)
+        pg.draw.line(self.surface, (0, 0, 0), (593, 389), (80, 670), 7)
+        pg.draw.arc(self.surface, (0, 0, 0), (58, 645, 120, 200), math.radians(130), math.radians(200), 5)
+        pg.draw.arc(self.surface, (0, 0, 0), (-688, 596, 3000, 200), math.radians(240), math.radians(295), 5)
+        pg.draw.arc(self.surface, (0, 0, 0), (1216, 377, 240, 610), math.radians(-20), math.radians(70), 5)
+        pg.draw.arc(self.surface, (0, 0, 0), (1352, 290, 100, 120), math.radians(130), math.radians(240), 5)
+        pg.draw.line(self.surface, (0, 0, 0), (1365, 312), (1531, 86), 7)
+
+        #inside track
+        pg.draw.arc(self.surface, (0, 0, 0), (-100, 120, 1600, 200), math.radians(40), math.radians(130), 5)
+        pg.draw.arc(self.surface, (0, 0, 0), (170, 138, 50, 180), math.radians(110), math.radians(250), 6)
+        pg.draw.arc(self.surface, (0, 0, 0), (168, 233, 590, 240), math.radians(-40), math.radians(160), 6)
+        pg.draw.line(self.surface, (0, 0, 0), (690, 425), (240, 660), 7)
+        pg.draw.arc(self.surface, (0, 0, 0), (-335, 478, 2300, 200), math.radians(240), math.radians(295), 5)
+        pg.draw.arc(self.surface, (0, 0, 0), (1225, 304, 100, 390), math.radians(-60), math.radians(60), 5)
+        pg.draw.line(self.surface, (0, 0, 0), (1300, 335), (1350, 220), 7)
+        pg.draw.arc(self.surface, (0, 0, 0), (1257, 154, 96, 141), math.radians(0), math.radians(85), 5)
+        self.mask = pg.mask.from_surface(self.surface)
+
+    def check_collision(self, pos):
+        x, y = int(pos[0]), int(pos[1])
+        if 0 <= x < WIDTH and 0 <= y < HEIGHT:
+            return self.mask.get_at((x, y)) == 1
+        return False
+
+class CheckpointLayer:
+    def __init__(self):
+        self.surface = pg.Surface((WIDTH, HEIGHT)).convert_alpha()
+        self.surface.fill((0, 0, 0, 0))
+
+    def draw_checkpoints(self, active_only=False, active_index=0):
+        checkpoints = CHECKPOINTS
+
+        for i, (p1, p2) in enumerate(checkpoints):
+
+            if active_only and i != active_index:
+                continue
+
+            # Set color - green for active checkpoint, blue for others
+            color = GREEN if i == active_index else BLUE
+            
+            # Draw the checkpoint line
+            
+            pg.draw.line(self.surface, color, p1, p2, 2)
+
+CHECKPOINTS = [
+    ((700, 50), (700, 120)),
+    ((600, 50), (600, 120)),
+    ((500, 56), (500, 123)),
+    ((400, 58), (400, 126)),
+    ((300, 60), (300, 135)),
+    ((200, 68), (200, 140)),
+    ((60, 74), (188, 142)),
+    ((50, 150), (188, 150)),
+    ((48, 200), (173, 200)),
+    ((46, 250), (173, 250)),
+    ((47, 300), (183, 300)),
+    ((42, 390), (187, 310)),
+    ((48, 490), (190, 310)),
+    ((120, 510), (195, 305)),
+    ((300, 442), (270, 265)),
+    ((400, 405), (370, 240)),
+    ((500, 365), (470, 235)),
+    ((590, 345), (570, 243)),
+    ((600, 355), (753, 340)),
+    ((570, 400), (645, 450)),
+    ((500, 440), (550, 500)),
+    ((400, 495), (450, 550)),
+    ((300, 550), (350, 600)),
+    ((120, 650), (260, 650)),
+    ((290, 665), (290, 789)),
+    ((590, 670), (590, 790)),
+    ((890, 675), (890, 789)),
+    ((1190, 669), (1190, 789)),
+    ((1303, 650), (1453, 670)),
+    ((1320, 500), (1433, 520)),
+    ((1305, 350), (1359, 370)),
+    ((1333, 256), (1380, 290)),
+    ((1325, 160), (1492, 140)),
+    ((1250, 66), (1250, 147)),
+    ((1000, 58), (1000, 127))
+]
+
+def check_checkpoint_crossing(car):
+    if car.checkpoint_number >= len(CHECKPOINTS):
+        return False
+
+    _, _, car_rect = car.get_mask_and_rect()
+
+    p1, p2 = CHECKPOINTS[car.checkpoint_number]
+
+    clipped_line = car_rect.clipline(p1, p2)
+    if clipped_line:
+        car.checkpoint_number += 1
+        if car.checkpoint_number >= len(CHECKPOINTS):
+            car.checkpoint_number = 0
+        return True  # Checkpoint was crossed
+    return False
+
+
+# Genetic Algorithm parameters
+POPULATION_SIZE = 50
+GENOME_LENGTH = INPUT_SIZE * HIDDEN_SIZE + HIDDEN_SIZE * OUTPUT_SIZE
+SURVIVORS = 5
+MUTATION_RATE = 0.1
+CHECKPOINT_TIMEOUT = 3.0  # Seconds since last checkpoint before ending generation
+
+def breed(parent1, parent2):
+    # Single point crossover
+    crossover_point = random.randint(1, GENOME_LENGTH - 1)
+    child_genome = np.concatenate([parent1.brain.get_weights()[:crossover_point], 
+                                  parent2.brain.get_weights()[crossover_point:]])
+    
+    # Mutation
+    for i in range(len(child_genome)):
+        if random.random() < MUTATION_RATE:
+            child_genome[i] += random.uniform(-0.2, 0.2)
+            child_genome[i] = max(min(child_genome[i], 1), -1)  # keep weights in [-1,1]
+
+    return Car(child_genome)
+
+def evolve_population(population):
+    # Calculate fitness for all cars
+    for car in population:
+        car.calculate_fitness()
+    
+    # Sort cars by fitness
+    population.sort(key=lambda c: c.fitness, reverse=True)
+    
+    # Print stats
+    best_car = population[0]
+    print(f"Best fitness: {best_car.fitness:.2f}, Checkpoints: {best_car.checkpoint_number}, Distance: {best_car.distance_traveled:.2f}")
+
+    # Keep top survivors
+    survivors = population[:SURVIVORS]
+
+    # Breed new population
+    new_population = []
+    
+    # Add elite (unchanged top performers)
+    elite_count = 5
+    for i in range(elite_count):
+        new_car = Car(survivors[i].brain.get_weights())
+        new_population.append(new_car)
+    
+    # Fill the rest through breeding
+    while len(new_population) < POPULATION_SIZE:
+        # Tournament selection
+        parent1 = random.choice(survivors[:5])  # Bias toward better performers
+        parent2 = random.choice(survivors)
+        child = breed(parent1, parent2)
+        new_population.append(child)
+        
+    return new_population
+
+def run_simulation(population, track, checkpoints):
+    """Run a single generation simulation"""
+    clock = pg.time.Clock()
+    font = pg.font.SysFont(None, 36)
+    
+    # Track simulation time and time since last checkpoint
+    start_time = time.time()
+    last_checkpoint_time = start_time  # Time when any car last crossed a checkpoint
+    running = True
+    
+    # For visualization
+    show_sensors = True
+    show_all_cars = True
+    best_car_index = 0
+    
+    while running:
+        elapsed_time = time.time() - start_time
+        time_since_checkpoint = time.time() - last_checkpoint_time
+        
+        # Check if we should end this generation
+        cars_alive = sum(1 for car in population if car.alive)
+        
+        # End if timeout reached or no cars alive
+        if time_since_checkpoint > CHECKPOINT_TIMEOUT or cars_alive == 0:
+            running = False
+            break
+        
+        # Process events
+        for event in pg.event.get():
+            if event.type == pg.QUIT:
+                pg.quit()
+                exit()
+            if event.type == pg.KEYDOWN:
+                if event.key == pg.K_s:
+                    show_sensors = not show_sensors
+                if event.key == pg.K_a:
+                    show_all_cars = not show_all_cars
+                    
+        # Update all cars
+        checkpoint_crossed_this_frame = False
+        for car in population:
+            if car.alive:
+                # Get sensor data
+                sensor_values = car.sense(track.mask, screen, draw=False)
+                
+                # Let the car make a decision
+                car.think(sensor_values)
+                
+                # Update car position
+                car.update()
+                
+                # Check checkpoint crossing
+                if check_checkpoint_crossing(car):
+                    checkpoint_crossed_this_frame = True
+                
+                # Check collision
+                rotated_surf, car_mask, car_rect = car.get_mask_and_rect()
+                offset = (car_rect.left, car_rect.top)
+                if track.mask.overlap(car_mask, offset):
+                    car.alive = False
+        
+        # Update last checkpoint time if any car crossed a checkpoint
+        if checkpoint_crossed_this_frame:
+            last_checkpoint_time = time.time()
+        
+        # Find the best performing car for display
+        alive_cars = [c for c in population if c.alive]
+        if alive_cars:
+            # Sort by checkpoints reached then by distance
+            alive_cars.sort(key=lambda c: (c.checkpoint_number, c.distance_traveled), reverse=True)
+            if alive_cars:
+                best_car_index = population.index(alive_cars[0])
+        
+        # Drawing
+        screen.fill(WHITE)
+        screen.blit(track.surface, (0, 0))
+        
+        # Draw checkpoints
+        checkpoints.surface.fill((0, 0, 0, 0))  # Clear
+        
+        # Draw active checkpoint for best car
+        best_car = population[best_car_index]
+        if best_car.checkpoint_number < len(CHECKPOINTS):
+            checkpoints.draw_checkpoints(active_only=True, active_index=best_car.checkpoint_number)
+        
+        screen.blit(checkpoints.surface, (0, 0))
+        
+        # Draw cars based on settings
+        if show_all_cars:
+            for i, car in enumerate(population):
+                car.draw(screen)
+                # Draw sensors only for best car
+                if i == best_car_index and car.alive and show_sensors:
+                    car.sense(track.mask, screen, draw=True)
+        else:
+            # Just draw the best car
+            best_car = population[best_car_index]
+            best_car.draw(screen)
+            if best_car.alive and show_sensors:
+                best_car.sense(track.mask, screen, draw=True)
+        
+        # Draw stats
+        alive_count = sum(1 for car in population if car.alive)
+        gen_text = font.render(f"Generation: {generation+1}", True, BLACK)
+        alive_text = font.render(f"Cars Alive: {alive_count}/{POPULATION_SIZE}", True, BLACK)
+        time_text = font.render(f"Time: {elapsed_time:.1f}s", True, BLACK)
+        timeout_text = font.render(f"Timeout in: {max(0, CHECKPOINT_TIMEOUT - time_since_checkpoint):.1f}s", True, RED)
+        checkpoint_text = font.render(f"Best Checkpoint: {max(car.checkpoint_number for car in population)}/{len(CHECKPOINTS)}", True, BLACK)
+        
+        screen.blit(gen_text, (WIDTH//2 + 50, HEIGHT//2 - 200))
+        screen.blit(alive_text, (WIDTH//2 + 50, HEIGHT//2 - 160))
+        screen.blit(time_text, (WIDTH//2 + 50, HEIGHT//2 - 120))
+        screen.blit(timeout_text, (WIDTH//2 + 50, HEIGHT//2 - 80))
+        screen.blit(checkpoint_text, (WIDTH//2 + 50, HEIGHT//2 - 40))
+        
+        # Update display
+        pg.display.flip()
+        clock.tick(FPS)
+    
+    # Return final population for evolution
+    return population
+
+def main():
+    # Initialize pygame and game objects
+    track = Track()
+    track.draw()
+    checkpoints = CheckpointLayer()
+    
+    # Create initial population
+    population = [Car() for _ in range(POPULATION_SIZE)]
+    
+    # Run for multiple generations
+    global generation
+    generation = 0
+    num_generations = 1000
+    
+    # Main loop
+    running = True
+    while running and generation < num_generations:
+        print(f"\n--- Generation {generation+1} ---")
+        
+        # Run the simulation for this generation
+        final_population = run_simulation(population, track, checkpoints)
+        
+        # Evolve population for next generation
+        population = evolve_population(final_population)
+        
+        generation += 1
+        
+        # Check if user wants to quit
+        for event in pg.event.get():
+            if event.type == pg.QUIT:
+                running = False
+
+    pg.quit()
+
+if __name__ == "__main__":
+    main()
