@@ -39,7 +39,11 @@ Controls and Usage
 
 
 Implementation Overview
-Each car is represented by a neural network that maps sensor readings to control outputs. During each generation, cars are evaluated based on a fitness function that incorporates distance traveled, checkpoints reached, and time survived. After all cars have finished, the top performers are selected to produce the next generation through mutation-based reproduction. The track is defined as a polygonal boundary, and collision detection is performed using ray casting and geometric intersection tests.The simulation is optimized to run many cars simultaneously while maintaining real-time visualization. Metrics are displayed on-screen to track progress across generations.Example OutputBelow is an example screenshot from the simulation showing multiple cars navigating the track and the generation statistics panel.(Insert your image here.)
+Each car is represented by a neural network that maps sensor readings to control outputs. During each generation, cars are evaluated based on a fitness function that incorporates distance traveled, checkpoints reached, and time survived. After all cars have finished, the top performers are selected to produce the next generation through mutation-based reproduction. The track is defined as a polygonal boundary, and collision detection is performed using ray casting and geometric intersection tests.The simulation is optimized to run many cars simultaneously while maintaining real-time visualization. Metrics are displayed on-screen to track progress across generations.
+
+Example Output
+Below is an example screenshot from the simulation showing multiple cars navigating the track and the generation statistics panel.
+<img width="1594" height="923" alt="Screenshot 2026-03-23 174200" src="https://github.com/user-attachments/assets/8ab56e4b-9bc1-49fd-bd8c-360e1d29b903" />
 
 
 Future Improvements
